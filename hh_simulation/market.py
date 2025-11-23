@@ -7,6 +7,15 @@ import numpy as np
 
 from .agents import Worker, Firm, Headhunter
 
+
+@dataclass
+class Welfare:
+    """Welfare calculations for a set of matches."""
+    headhunter_welfare: float
+    firm_welfare: float
+    worker_welfare: float
+    match_welfare: float  # Total welfare (sum of all three)
+
 # Constants
 PHI_COMMISSION = 0.3  # φ: Headhunter commission rate (typically 20-30% of first-year salary)
 
@@ -326,6 +335,25 @@ class Market:
             matches=matches,
             unmatched_workers=unmatched_workers_list,
             unmatched_firms=unmatched_firms_list,
+        )
+    
+    def calculate_welfare(self, matches: List[Match]) -> Welfare:
+        """
+        Calculate welfare from a list of matches.
+        
+        Returns:
+            Welfare object with headhunter_welfare, firm_welfare, worker_welfare, and match_welfare
+        """
+        headhunter_welfare = sum(m.headhunter_utility for m in matches)
+        firm_welfare = sum(m.firm_utility for m in matches)
+        worker_welfare = sum(m.worker_utility for m in matches)
+        match_welfare = firm_welfare + worker_welfare
+        
+        return Welfare(
+            headhunter_welfare=headhunter_welfare,
+            firm_welfare=firm_welfare,
+            worker_welfare=worker_welfare,
+            match_welfare=match_welfare,
         )
     
     def run(self) -> List[PeriodResults]:

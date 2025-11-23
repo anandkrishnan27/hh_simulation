@@ -24,9 +24,6 @@ python -m hh_simulation \
     --seed 42
 '''
 
-
-
-
 @app.command()
 def run(
     num_workers: int = typer.Option(50, help="Number of workers"),
@@ -95,9 +92,31 @@ def run(
     total_matches = sum(len(r.matches) for r in results)
     early_matches = len(results[0].matches)
     regular_matches = len(results[1].matches)
-    console.print(f"Total matches: {total_matches}")
+    console.print(f"Total matches: {total_matches} ({100*total_matches/(num_workers):.1f}%)")
     console.print(f"Early phase matches: {early_matches} ({100*early_matches/total_matches:.1f}%)" if total_matches > 0 else "Early phase matches: 0")
     console.print(f"Regular phase matches: {regular_matches} ({100*regular_matches/total_matches:.1f}%)" if total_matches > 0 else "Regular phase matches: 0")
+    
+    # Welfare calculations
+    console.print("\n[bold]Welfare Statistics[/bold]")
+    
+    # Per-period welfare
+    for period_results in results:
+        period_name = "Early Phase (t=0)" if period_results.period == 0 else "Regular Phase (t=1)"
+        welfare = market.calculate_welfare(period_results.matches)
+        console.print(f"\n{period_name} Welfare:")
+        console.print(f"  Headhunter Welfare: {welfare.headhunter_welfare:.3f}")
+        console.print(f"  Firm Welfare: {welfare.firm_welfare:.3f}")
+        console.print(f"  Worker Welfare: {welfare.worker_welfare:.3f}")
+        console.print(f"  Total Match Welfare: {welfare.match_welfare:.3f}")
+    
+    # Total welfare across all periods
+    all_matches = [m for r in results for m in r.matches]
+    total_welfare = market.calculate_welfare(all_matches)
+    console.print(f"\n[bold]Total Welfare (All Periods):[/bold]")
+    console.print(f"  Headhunter Welfare: {total_welfare.headhunter_welfare:.3f}")
+    console.print(f"  Firm Welfare: {total_welfare.firm_welfare:.3f}")
+    console.print(f"  Worker Welfare: {total_welfare.worker_welfare:.3f}")
+    console.print(f"  Total Match Welfare: {total_welfare.match_welfare:.3f}")
     
     console.print("\n[green]Simulation complete.[/green]")
 
