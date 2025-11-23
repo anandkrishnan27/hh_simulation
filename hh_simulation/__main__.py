@@ -10,6 +10,22 @@ from .market import Market
 app = typer.Typer(add_completion=False)
 console = Console()
 
+'''
+Use below to run
+
+python -m hh_simulation \
+    --num-workers 50 \
+    --num-firms 20 \
+    --num-headhunters 5 \
+    --delta-w 0.1 \
+    --delta-f 0.1 \
+    --delta-h 0.05 \
+    --signal-noise-std 0.2 \
+    --seed 42
+'''
+
+
+
 
 @app.command()
 def run(
@@ -61,7 +77,7 @@ def run(
                 worker = market.worker_dict[match.worker_id]
                 table.add_row(
                     f"W{match.worker_id} (q={worker.quality:.2f})",
-                    f"F{match.firm_id} (r={market.firm_dict[match.firm_id].rank})",
+                    f"F{match.firm_id} (r={market.firm_dict[match.firm_id].prestige})",
                     f"H{match.headhunter_id}" if match.headhunter_id is not None else "None",
                     f"{match.observed_quality:.3f}",
                     f"{match.worker_utility:.3f}",
