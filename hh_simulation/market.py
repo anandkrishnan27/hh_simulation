@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Set, Dict, Tuple
+from typing import List, Optional, Set, Dict, Tuple, Literal
 import random
+import math
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 
-from .agents import Worker, Firm, Headhunter
+from .agents import Worker, Firm, Headhunter, Agent
 
 
 @dataclass
@@ -16,21 +18,17 @@ class Welfare:
     worker_welfare: float
     match_welfare: float  # Total welfare (sum of all three)
 
-# Constants
-PHI_COMMISSION = 0.3  # φ: Headhunter commission rate (typically 20-30% of first-year salary)
-
-
 @dataclass
 class Match:
-    """Represents a match between a worker and firm."""
-    worker_id: int
+    """Represents a match between a worker/agent and firm."""
+    worker_id: int  # Worker ID (or agent ID in period 0, which maps to worker in period 1)
     firm_id: int
     period: int  # 0 for early phase, 1 for regular phase
     headhunter_id: Optional[int] = None
     worker_utility: float = 0.0
     firm_utility: float = 0.0
     headhunter_utility: float = 0.0
-    observed_quality: float = 0.0  # Quality observed by firm (noisy at t=0, true at t=1)
+    expected_quality: float = 0.0  # Expected quality for period 0, true quality for period 1
 
 
 @dataclass
@@ -44,10 +42,16 @@ class PeriodResults:
 
 class Market:
     """
-    Two-period market simulation.
+    Two-period market simulation with common preferences.
     
-    Period 0 (early phase): Firms observe noisy signals of worker quality
-    Period 1 (regular phase): Firms observe true worker quality
+    Common preferences assumption:
+    - All firms have the same ordinal preferences over workers (ranked by quality q_j)
+    - All workers have the same ordinal preferences over firms (ranked by value v(i))
+    - Each worker provides the same utility to every firm: u_f(w_j) = q_j for all firms f
+    - Each firm provides the same utility to every worker: U_w(f_i) = v(i) for all workers w
+    
+    Period 0 (early phase): Agents have probability distributions over eventual rankings
+    Period 1 (regular phase): Agents resolve to workers with true quality revealed
     """
     
     def __init__(
@@ -55,49 +59,56 @@ class Market:
         workers: List[Worker],
         firms: List[Firm],
         headhunters: List[Headhunter],
-        delta_w: float = 0.1,  # δ_w: Worker early signing bonus
-        delta_f: float = 0.1,  # δ_f: Firm benefit from early hiring
-        delta_h: float = 0.05,  # δ_h: Headhunter benefit from early placement
-        signal_noise_std: float = 0.2,  # σ: standard deviation of noise at t=0
-        alpha: float = 0.3,  # α: Baseline utility multiplier (ū_j = α * q_j)
-        lambda_prob: float = 1.0,  # λ: Parameter for logistic probability distribution
-        omega: float = 0.5,  # ω: Weight for reputation impact (η = (1-ω)U_w + ωU_f)
+        gamma: float = 0.3,  # γ: Outside option scaling factor (v_j(outside) = γ * max_f v(f))
+        alpha: float = 0.5,  # α: Headhunter utility weight (u_h = α·μ + (1-α)·η)
+        matching_algorithm: Literal["enumerative", "hungarian"] = "hungarian",  # Algorithm for headhunter matching
         rng: Optional[random.Random] = None,
         np_rng: Optional[np.random.Generator] = None,
     ) -> None:
         self.workers = workers
         self.firms = firms
         self.headhunters = headhunters
-        self.delta_w = delta_w
-        self.delta_f = delta_f
-        self.delta_h = delta_h
-        self.signal_noise_std = signal_noise_std
+        self.gamma = gamma
         self.alpha = alpha
-        self.lambda_prob = lambda_prob
-        self.omega = omega
+        self.matching_algorithm = matching_algorithm
         self.rng = rng if rng is not None else random.Random()
         self.np_rng = np_rng if np_rng is not None else np.random.default_rng()
         
-        # Sort workers by quality (descending) and firms by prestige (ascending)
+        # Sort workers by quality (descending) - common ranking for all firms
+        # Sort firms by prestige (ascending) - common ranking for all workers
         self.workers.sort(key=lambda w: w.quality, reverse=True)
         self.firms.sort(key=lambda f: f.prestige)
         
         # Create lookup dictionaries
         self.worker_dict = {w.worker_id: w for w in self.workers}
         self.firm_dict = {f.firm_id: f for f in self.firms}
+        
+        # Compute baseline utility for each worker: γ * (quality / max_quality) * max_f v(f)
+        # Since all workers have common preferences, max_f v(f) is the same for all workers
+        max_firm_value = max(f.value for f in self.firms) if self.firms else 0.0
+        self.v_max = max_firm_value  # v_max = max_f v(f) for headhunter payment calculation
+        max_quality = max(w.quality for w in self.workers) if self.workers else 1.0
+        
+        # Set baseline utility for each worker based on their quality
+        # Higher quality workers have better outside options (common preferences maintained)
+        for worker in self.workers:
+            quality_ratio = worker.quality / max_quality if max_quality > 0 else 0.0
+            worker.baseline_utility = self.gamma * quality_ratio * max_firm_value
+        
+        # Create agents for period 0 (will be created in _create_agents)
+        self.agents: List[Agent] = []
+        self.agent_dict: Dict[int, Agent] = {}
+        # Mapping from agent_id to worker_id (resolved in period 1)
+        self.agent_to_worker: Dict[int, int] = {}
     
     @staticmethod
     def random_market(
         num_workers: int = 50,
         num_firms: int = 20,
         num_headhunters: int = 5,
-        delta_w: float = 0.1,
-        delta_f: float = 0.1,
-        delta_h: float = 0.05,
-        signal_noise_std: float = 0.2,
+        gamma: float = 0.5,
         alpha: float = 0.5,
-        lambda_prob: float = 1.0,
-        omega: float = 0.5,
+        matching_algorithm: Literal["enumerative", "hungarian"] = "hungarian",
         seed: Optional[int] = None,
     ) -> "Market":
         """Create a random market with specified parameters."""
@@ -105,13 +116,12 @@ class Market:
         np_rng = np.random.default_rng(seed)
         
         # Create workers with random quality, then sort by quality
-        # Baseline utility: ū_j = α * q_j
+        # Baseline utility is computed in Market.__init__ as γ * max_f v(f)
         workers = []
         for i in range(num_workers):
             # Generate random quality values
             quality = np_rng.uniform(0.0, 1.0)
-            baseline_utility = alpha * quality
-            workers.append(Worker(worker_id=i, quality=quality, baseline_utility=baseline_utility))
+            workers.append(Worker(worker_id=i, quality=quality))
         
         # Sort workers by quality (descending) so q_1 > q_2 > ... > q_n
         workers.sort(key=lambda w: w.quality, reverse=True)
@@ -146,8 +156,6 @@ class Market:
                     headhunter_id=h_id,
                     firm_ids=firm_ids,
                     worker_ids=worker_ids,
-                    phi=PHI_COMMISSION,
-                    delta_h=delta_h,
                 )
             )
         
@@ -155,180 +163,565 @@ class Market:
             workers=workers,
             firms=firms,
             headhunters=headhunters,
-            delta_w=delta_w,
-            delta_f=delta_f,
-            delta_h=delta_h,
-            signal_noise_std=signal_noise_std,
+            gamma=gamma,
             alpha=alpha,
-            lambda_prob=lambda_prob,
-            omega=omega,
+            matching_algorithm=matching_algorithm,
             rng=rng,
             np_rng=np_rng,
         )
     
-    def _get_observed_quality(self, worker: Worker, period: int) -> float:
-        """Get quality observed by firms: q' = q + ε at t=0, q at t=1."""
-        if period == 0:
-            noise = self.np_rng.normal(0.0, self.signal_noise_std)
-            return worker.quality + noise
-        return worker.quality
-    
-    def _compute_eta(self, firm: Firm, worker: Worker, period: int) -> float:
+    def _create_agents(self, poisson_lambda: float = 0.5) -> None:
         """
-        Compute reputation impact η_{i,j}(t) from match.
+        Create agents with probability distributions over rankings for period 0.
+        Each agent a_j is assigned to a distinct worker and has a truncated Poisson
+        distribution centered around that worker's rank, ensuring no ties.
         
-        η_{ij}(t) = (1 - ω)U_w(f_i, t) + ω U_f(w_j, t)
+        Args:
+            poisson_lambda: Lambda parameter for Poisson distribution (controls spread).
+                           Smaller values = more concentrated around assigned rank.
+                           Default 0.5 ensures P(distance=0) > P(distance=1).
         """
-        worker_util = worker.utility(firm.value, self.delta_w, period)
-        observed_quality = self._get_observed_quality(worker, period)
-        firm_util = firm.utility(observed_quality, self.delta_f, period)
-        return ((1.0 - self.omega) * worker_util) + (self.omega * firm_util)
-    
-    def _compute_acceptance_probability(
-        self, worker: Worker, firm: Firm, period: int
-    ) -> float:
-        """
-        Compute probability P(f_i, w_j, t) that match is successful.
+        num_workers = len(self.workers)
+        self.agents = []
+        self.agent_dict = {}
         
-        P(f_i, w_j, t) = 1 / (1 + exp(λ|U_w(f_i, t) - U_f(w_j, t)|))
+        # Assign each agent to a distinct worker (one-to-one mapping)
+        # Shuffle to randomize the assignment
+        worker_assignments = list(range(num_workers))
+        self.np_rng.shuffle(worker_assignments)
+        
+        for agent_id, assigned_worker_rank in enumerate(worker_assignments):
+            # Create truncated Poisson distribution centered at assigned rank
+            # Probability decreases with distance from assigned rank
+            
+            # Compute Poisson probabilities for each rank
+            probs = np.zeros(num_workers)
+            for rank_idx in range(num_workers):
+                # Distance from assigned rank
+                distance = abs(rank_idx - assigned_worker_rank)
+                # Poisson PMF: P(k; λ) = (λ^k * e^(-λ)) / k!
+                # We use distance as k, so probability decreases with distance
+                if distance == 0:
+                    prob = np.exp(-poisson_lambda)  # P(0; λ)
+                else:
+                    # For k > 0: (λ^k * e^(-λ)) / k!
+                    prob = (poisson_lambda ** distance) * np.exp(-poisson_lambda) / math.factorial(distance)
+                probs[rank_idx] = prob
+            
+            # Normalize to ensure probabilities sum to 1 (truncated Poisson)
+            probs = probs / np.sum(probs)
+            
+            agent = Agent(agent_id=agent_id, rank_distribution=probs, assigned_worker_rank=assigned_worker_rank)
+            self.agents.append(agent)
+            self.agent_dict[agent_id] = agent
+    
+    def _resolve_agent_to_worker(self, agent_id: int) -> int:
         """
-        worker_util = worker.utility(firm.value, self.delta_w, period)
-        observed_quality = self._get_observed_quality(worker, period)
-        firm_util = firm.utility(observed_quality, self.delta_f, period)
-        utility_diff = abs(worker_util - firm_util)
-        return 1.0 / (1.0 + np.exp(self.lambda_prob * utility_diff))
+        Resolve agent to worker in period 1.
+        
+        Uses the assigned worker rank to ensure no ties (each agent resolves to a distinct worker).
+        The probability distribution is used for expected utility calculations in period 0,
+        but resolution is deterministic to guarantee one-to-one mapping.
+        
+        Returns the worker_id that the agent becomes.
+        """
+        if agent_id in self.agent_to_worker:
+            return self.agent_to_worker[agent_id]
+        
+        agent = self.agent_dict[agent_id]
+        # Use assigned worker rank to ensure no ties
+        # assigned_worker_rank is 0-indexed, so workers[assigned_worker_rank] is the assigned worker
+        worker_id = self.workers[agent.assigned_worker_rank].worker_id
+        self.agent_to_worker[agent_id] = worker_id
+        return worker_id
+    
+    def _enumerate_optimal_matching_agent(
+        self,
+        headhunter: Headhunter,
+        accessible_agents: List[int],
+        accessible_firms: List[int],
+    ) -> Dict[int, int]:
+        """
+        Enumerate all possible matchings and find the one that maximizes headhunter total utility.
+        
+        Returns a dictionary {agent_id: firm_id} representing the optimal matching.
+        """
+        if not accessible_agents or not accessible_firms:
+            return {}
+        
+        # Filter to only valid pairs (respecting can_match constraint)
+        valid_pairs = []
+        for agent_id in accessible_agents:
+            for firm_id in accessible_firms:
+                if headhunter.can_match(firm_id, agent_id):
+                    agent = self.agent_dict[agent_id]
+                    firm = self.firm_dict[firm_id]
+                    utility = headhunter.utility_agent(firm, agent, self.workers, self.v_max, self.alpha)
+                    valid_pairs.append((agent_id, firm_id, utility))
+        
+        if not valid_pairs:
+            return {}
+        
+        # Enumerate all possible matchings using recursive backtracking
+        best_matching: Dict[int, int] = {}
+        max_utility = [float('-inf')]  # Use list to allow modification in nested function
+        
+        def enumerate_recursive(
+            remaining_pairs: List[Tuple[int, int, float]],
+            current_matching: Dict[int, int],
+            current_utility: float,
+            used_agents: Set[int],
+            used_firms: Set[int],
+        ) -> None:
+            """Recursively enumerate all valid matchings."""
+            # Update best if current is better
+            if current_utility > max_utility[0]:
+                best_matching.clear()
+                best_matching.update(current_matching)
+                max_utility[0] = current_utility
+            
+            # Try adding each remaining valid pair
+            for idx, (agent_id, firm_id, utility) in enumerate(remaining_pairs):
+                if agent_id not in used_agents and firm_id not in used_firms:
+                    # Add this pair to matching
+                    current_matching[agent_id] = firm_id
+                    used_agents.add(agent_id)
+                    used_firms.add(firm_id)
+                    
+                    # Recurse with remaining pairs and updated utility
+                    enumerate_recursive(
+                        remaining_pairs[idx + 1:],
+                        current_matching,
+                        current_utility + utility,
+                        used_agents,
+                        used_firms,
+                    )
+                    
+                    # Backtrack
+                    current_matching.pop(agent_id)
+                    used_agents.remove(agent_id)
+                    used_firms.remove(firm_id)
+        
+        # Start enumeration
+        enumerate_recursive(valid_pairs, {}, 0.0, set(), set())
+        
+        return best_matching
+    
+    def _enumerate_optimal_matching_worker(
+        self,
+        headhunter: Headhunter,
+        accessible_workers: List[int],
+        accessible_firms: List[int],
+    ) -> Dict[int, int]:
+        """
+        Enumerate all possible matchings and find the one that maximizes headhunter total utility.
+        
+        Returns a dictionary {worker_id: firm_id} representing the optimal matching.
+        """
+        if not accessible_workers or not accessible_firms:
+            return {}
+        
+        # Filter to only valid pairs (respecting can_match constraint)
+        valid_pairs = []
+        for worker_id in accessible_workers:
+            for firm_id in accessible_firms:
+                if headhunter.can_match(firm_id, worker_id):
+                    worker = self.worker_dict[worker_id]
+                    firm = self.firm_dict[firm_id]
+                    utility = headhunter.utility_worker(firm, worker, self.v_max, self.alpha)
+                    valid_pairs.append((worker_id, firm_id, utility))
+        
+        if not valid_pairs:
+            return {}
+        
+        # Enumerate all possible matchings using recursive backtracking
+        best_matching: Dict[int, int] = {}
+        max_utility = [float('-inf')]  # Use list to allow modification in nested function
+        
+        def enumerate_recursive(
+            remaining_pairs: List[Tuple[int, int, float]],
+            current_matching: Dict[int, int],
+            current_utility: float,
+            used_workers: Set[int],
+            used_firms: Set[int],
+        ) -> None:
+            """Recursively enumerate all valid matchings."""
+            # Update best if current is better
+            if current_utility > max_utility[0]:
+                best_matching.clear()
+                best_matching.update(current_matching)
+                max_utility[0] = current_utility
+            
+            # Try adding each remaining valid pair
+            for idx, (worker_id, firm_id, utility) in enumerate(remaining_pairs):
+                if worker_id not in used_workers and firm_id not in used_firms:
+                    # Add this pair to matching
+                    current_matching[worker_id] = firm_id
+                    used_workers.add(worker_id)
+                    used_firms.add(firm_id)
+                    
+                    # Recurse with remaining pairs and updated utility
+                    enumerate_recursive(
+                        remaining_pairs[idx + 1:],
+                        current_matching,
+                        current_utility + utility,
+                        used_workers,
+                        used_firms,
+                    )
+                    
+                    # Backtrack
+                    current_matching.pop(worker_id)
+                    used_workers.remove(worker_id)
+                    used_firms.remove(firm_id)
+        
+        # Start enumeration
+        enumerate_recursive(valid_pairs, {}, 0.0, set(), set())
+        
+        return best_matching
+    
+    def _hungarian_optimal_matching_agent(
+        self,
+        headhunter: Headhunter,
+        accessible_agents: List[int],
+        accessible_firms: List[int],
+    ) -> Dict[int, int]:
+        """
+        Find optimal matching using Hungarian algorithm (much faster than enumeration).
+        
+        Returns a dictionary {agent_id: firm_id} representing the optimal matching.
+        """
+        if not accessible_agents or not accessible_firms:
+            return {}
+        
+        # Build cost matrix: rows = agents, columns = firms
+        # Use negative utilities because Hungarian algorithm minimizes cost
+        num_agents = len(accessible_agents)
+        num_firms = len(accessible_firms)
+        max_size = max(num_agents, num_firms)
+        
+        # Create square matrix (pad with zeros for unmatched pairs)
+        cost_matrix = np.full((max_size, max_size), 0.0)
+        
+        # Map indices
+        agent_to_idx = {agent_id: idx for idx, agent_id in enumerate(accessible_agents)}
+        firm_to_idx = {firm_id: idx for idx, firm_id in enumerate(accessible_firms)}
+        
+        # Fill in valid pairs with negative utility (we want to maximize, Hungarian minimizes)
+        for agent_id in accessible_agents:
+            for firm_id in accessible_firms:
+                if headhunter.can_match(firm_id, agent_id):
+                    agent = self.agent_dict[agent_id]
+                    firm = self.firm_dict[firm_id]
+                    utility = headhunter.utility_agent(firm, agent, self.workers, self.v_max, self.alpha)
+                    # Use negative because Hungarian minimizes, we want to maximize
+                    cost_matrix[agent_to_idx[agent_id], firm_to_idx[firm_id]] = -utility
+        
+        # Solve assignment problem
+        row_indices, col_indices = linear_sum_assignment(cost_matrix)
+        
+        # Build matching dictionary (only include pairs with non-zero utility)
+        matching = {}
+        for row_idx, col_idx in zip(row_indices, col_indices):
+            if row_idx < num_agents and col_idx < num_firms:
+                agent_id = accessible_agents[row_idx]
+                firm_id = accessible_firms[col_idx]
+                # Only include if it's a valid match and has positive utility
+                if headhunter.can_match(firm_id, agent_id) and cost_matrix[row_idx, col_idx] < 0:
+                    matching[agent_id] = firm_id
+        
+        return matching
+    
+    def _hungarian_optimal_matching_worker(
+        self,
+        headhunter: Headhunter,
+        accessible_workers: List[int],
+        accessible_firms: List[int],
+    ) -> Dict[int, int]:
+        """
+        Find optimal matching using Hungarian algorithm (much faster than enumeration).
+        
+        Returns a dictionary {worker_id: firm_id} representing the optimal matching.
+        """
+        if not accessible_workers or not accessible_firms:
+            return {}
+        
+        # Build cost matrix: rows = workers, columns = firms
+        # Use negative utilities because Hungarian algorithm minimizes cost
+        num_workers = len(accessible_workers)
+        num_firms = len(accessible_firms)
+        max_size = max(num_workers, num_firms)
+        
+        # Create square matrix (pad with zeros for unmatched pairs)
+        cost_matrix = np.full((max_size, max_size), 0.0)
+        
+        # Map indices
+        worker_to_idx = {worker_id: idx for idx, worker_id in enumerate(accessible_workers)}
+        firm_to_idx = {firm_id: idx for idx, firm_id in enumerate(accessible_firms)}
+        
+        # Fill in valid pairs with negative utility (we want to maximize, Hungarian minimizes)
+        for worker_id in accessible_workers:
+            for firm_id in accessible_firms:
+                if headhunter.can_match(firm_id, worker_id):
+                    worker = self.worker_dict[worker_id]
+                    firm = self.firm_dict[firm_id]
+                    utility = headhunter.utility_worker(firm, worker, self.v_max, self.alpha)
+                    # Use negative because Hungarian minimizes, we want to maximize
+                    cost_matrix[worker_to_idx[worker_id], firm_to_idx[firm_id]] = -utility
+        
+        # Solve assignment problem
+        row_indices, col_indices = linear_sum_assignment(cost_matrix)
+        
+        # Build matching dictionary (only include pairs with non-zero utility)
+        matching = {}
+        for row_idx, col_idx in zip(row_indices, col_indices):
+            if row_idx < num_workers and col_idx < num_firms:
+                worker_id = accessible_workers[row_idx]
+                firm_id = accessible_firms[col_idx]
+                # Only include if it's a valid match and has positive utility
+                if headhunter.can_match(firm_id, worker_id) and cost_matrix[row_idx, col_idx] < 0:
+                    matching[worker_id] = firm_id
+        
+        return matching
     
     def _match_period(self, period: int, unmatched_workers: Set[int], unmatched_firms: Set[int]) -> PeriodResults:
         """
         Perform matching for a single period.
         
+        Period 0: Uses agents with probability distributions
+        Period 1: Uses workers with true quality
+        
         Algorithm:
-        1. Each headhunter greedily proposes matches step-by-step (highest utility pairs first)
-        2. Firms observe all proposals and greedily choose best worker (multiple firms can choose same worker)
-        3. Workers with multiple proposals choose best firm, then compare to baseline utility
+        1. Each headhunter finds optimal matching (using enumerative or Hungarian algorithm)
+           that maximizes total headhunter utility over all accessible firms and workers/agents
+        2. Firms observe all proposals and greedily choose best worker/agent (multiple firms can choose same worker/agent)
+        3. Workers/Agents with multiple proposals choose best firm, then compare to baseline utility
         4. Matches are finalized (no reneging)
         """
         matches: List[Match] = []
         
-        # Step 1: Each headhunter proposes matches using step-by-step greedy algorithm
-        # At step n, pick highest utility pair; if both unassigned, store match and mark as matched
-        headhunter_proposals: Dict[int, Dict[int, int]] = {}  # {headhunter_id: {worker_id: firm_id}}
-        
-        for headhunter in self.headhunters:
-            accessible_workers = [
-                w_id for w_id in headhunter.worker_ids 
-                if w_id in unmatched_workers
-            ]
-            accessible_firms = [
-                f_id for f_id in headhunter.firm_ids 
-                if f_id in unmatched_firms
-            ]
+        if period == 0:
+            # Period 0: Use agents
+            if not self.agents:
+                self._create_agents()
             
-            if not accessible_workers or not accessible_firms:
-                headhunter_proposals[headhunter.headhunter_id] = {}
-                continue
+            unmatched_agents = set(a.agent_id for a in self.agents if a.agent_id in unmatched_workers)
             
-            # Compute all possible pair utilities
-            all_pairs: List[Tuple[float, int, int, Worker, Firm]] = []
-            for worker_id in accessible_workers:
-                worker = self.worker_dict[worker_id]
-                for firm_id in accessible_firms:
-                    firm = self.firm_dict[firm_id]
-                    observed_quality = self._get_observed_quality(worker, period)
-                    acceptance_prob = self._compute_acceptance_probability(worker, firm, period)
-                    eta = self._compute_eta(firm, worker, period)
-                    expected_util = headhunter.utility(firm, worker, acceptance_prob, eta, period)
-                    all_pairs.append((expected_util, worker_id, firm_id, worker, firm))
+            # Step 1: Each headhunter proposes matches using enumerative algorithm
+            # (finds optimal matching that maximizes total headhunter utility)
+            headhunter_proposals: Dict[int, Dict[int, int]] = {}  # {headhunter_id: {agent_id: firm_id}}
             
-            # Sort by utility (descending)
-            all_pairs.sort(key=lambda x: x[0], reverse=True)
-            
-            # Step-by-step greedy: pick highest utility pair, if both unassigned, mark as matched
-            proposed_matching: Dict[int, int] = {}
-            assigned_workers = set()
-            assigned_firms = set()
-            
-            for expected_util, worker_id, firm_id, worker, firm in all_pairs:
-                if worker_id not in assigned_workers and firm_id not in assigned_firms:
-                    proposed_matching[worker_id] = firm_id
-                    assigned_workers.add(worker_id)
-                    assigned_firms.add(firm_id)
-            
-            headhunter_proposals[headhunter.headhunter_id] = proposed_matching
-        
-        # Step 2: Firms observe all proposals and greedily choose best worker
-        # Multiple firms can propose to the same worker
-        firm_choices: Dict[int, Tuple[Worker, Headhunter]] = {}  # {firm_id: (worker, headhunter)}
-        
-        for headhunter_id, matching in headhunter_proposals.items():
-            headhunter = next(h for h in self.headhunters if h.headhunter_id == headhunter_id)
-            for worker_id, firm_id in matching.items():
-                if worker_id not in unmatched_workers or firm_id not in unmatched_firms:
+            for headhunter in self.headhunters:
+                accessible_agents = [
+                    a_id for a_id in headhunter.worker_ids 
+                    if a_id in unmatched_agents
+                ]
+                accessible_firms = [
+                    f_id for f_id in headhunter.firm_ids 
+                    if f_id in unmatched_firms
+                ]
+                
+                if not accessible_agents or not accessible_firms:
+                    headhunter_proposals[headhunter.headhunter_id] = {}
                     continue
                 
-                worker = self.worker_dict[worker_id]
-                firm = self.firm_dict[firm_id]
-                observed_quality = self._get_observed_quality(worker, period)
-                firm_util = firm.utility(observed_quality, self.delta_f, period)
+                # Find optimal matching using selected algorithm
+                if self.matching_algorithm == "hungarian":
+                    optimal_matching = self._hungarian_optimal_matching_agent(
+                        headhunter, accessible_agents, accessible_firms
+                    )
+                else:  # enumerative
+                    optimal_matching = self._enumerate_optimal_matching_agent(
+                        headhunter, accessible_agents, accessible_firms
+                    )
                 
-                # Firm chooses best proposal (highest utility)
-                if firm_id not in firm_choices:
-                    firm_choices[firm_id] = (worker, headhunter)
-                else:
-                    current_worker, _ = firm_choices[firm_id]
-                    current_observed = self._get_observed_quality(current_worker, period)
-                    current_util = firm.utility(current_observed, self.delta_f, period)
-                    if firm_util > current_util:
-                        firm_choices[firm_id] = (worker, headhunter)
-        
-        # Step 3: Workers receive proposals and choose best, then compare to baseline
-        worker_proposals: Dict[int, List[Tuple[Firm, Headhunter, float]]] = {}
-        # {worker_id: [(firm, headhunter, worker_utility), ...]}
-        
-        for firm_id, (worker, headhunter) in firm_choices.items():
-            firm = self.firm_dict[firm_id]
-            worker_util = worker.utility(firm.value, self.delta_w, period)
+                headhunter_proposals[headhunter.headhunter_id] = optimal_matching
             
-            if worker.worker_id not in worker_proposals:
-                worker_proposals[worker.worker_id] = []
-            worker_proposals[worker.worker_id].append((firm, headhunter, worker_util))
-        
-        # Workers choose best proposal and accept if utility >= baseline
-        for worker_id, proposals in worker_proposals.items():
-            worker = self.worker_dict[worker_id]
+            # Step 2: Firms observe all proposals and greedily choose best agent
+            firm_choices: Dict[int, Tuple[Agent, Headhunter]] = {}  # {firm_id: (agent, headhunter)}
             
-            # Worker greedily chooses best proposal (highest worker utility)
-            best_proposal = max(proposals, key=lambda x: x[2])  # x[2] is worker_utility
-            firm, headhunter, worker_util = best_proposal
+            for headhunter_id, matching in headhunter_proposals.items():
+                headhunter = next(h for h in self.headhunters if h.headhunter_id == headhunter_id)
+                for agent_id, firm_id in matching.items():
+                    if agent_id not in unmatched_agents or firm_id not in unmatched_firms:
+                        continue
+                    
+                    agent = self.agent_dict[agent_id]
+                    firm = self.firm_dict[firm_id]
+                    firm_util = firm.utility(agent=agent, workers=self.workers, t=period)
+                    
+                    # Firm chooses best proposal (highest utility)
+                    if firm_id not in firm_choices:
+                        firm_choices[firm_id] = (agent, headhunter)
+                    else:
+                        current_agent, _ = firm_choices[firm_id]
+                        current_util = firm.utility(agent=current_agent, workers=self.workers, t=period)
+                        if firm_util > current_util:
+                            firm_choices[firm_id] = (agent, headhunter)
             
-            # Worker accepts if utility >= baseline
-            if worker_util < worker.baseline_utility:
-                continue
+            # Step 3: Agents receive proposals and choose best, then compare to baseline
+            # For agents, we need to compute expected worker utility
+            agent_proposals: Dict[int, List[Tuple[Firm, Headhunter, float]]] = {}
+            # {agent_id: [(firm, headhunter, expected_worker_utility), ...]}
             
-            # Match is finalized
-            observed_quality = self._get_observed_quality(worker, period)
-            firm_util = firm.utility(observed_quality, self.delta_f, period)
-            eta = self._compute_eta(firm, worker, period)
-            headhunter_util = headhunter.utility(firm, worker, 1.0, eta, period)
+            for firm_id, (agent, headhunter) in firm_choices.items():
+                firm = self.firm_dict[firm_id]
+                # Worker utility doesn't depend on agent: U_w(f_i, t) = v(i)
+                worker_util = firm.value
+                
+                if agent.agent_id not in agent_proposals:
+                    agent_proposals[agent.agent_id] = []
+                agent_proposals[agent.agent_id].append((firm, headhunter, worker_util))
             
-            matches.append(
-                Match(
-                    worker_id=worker.worker_id,
-                    firm_id=firm.firm_id,
-                    period=period,
-                    headhunter_id=headhunter.headhunter_id,
-                    worker_utility=worker_util,
-                    firm_utility=firm_util,
-                    headhunter_utility=headhunter_util,
-                    observed_quality=observed_quality,
+            # Agents choose best proposal and accept if expected utility >= expected baseline
+            for agent_id, proposals in agent_proposals.items():
+                agent = self.agent_dict[agent_id]
+                
+                # Agent greedily chooses best proposal (highest worker utility)
+                best_proposal = max(proposals, key=lambda x: x[2])  # x[2] is worker_utility
+                firm, headhunter, worker_util = best_proposal
+                
+                # Expected baseline utility: sum_k p_{jk} * baseline_utility(w_k)
+                # where baseline_utility(w_k) = γ * (q_k / max_q) * max_f v(f)
+                expected_baseline = sum(
+                    prob * self.workers[rank_idx].baseline_utility
+                    for rank_idx, prob in enumerate(agent.rank_distribution)
+                    if rank_idx < len(self.workers)
                 )
-            )
-        
-        # Track unmatched
-        matched_worker_ids = {m.worker_id for m in matches}
-        matched_firm_ids = {m.firm_id for m in matches}
-        unmatched_workers_list = [w for w in unmatched_workers if w not in matched_worker_ids]
-        unmatched_firms_list = [f for f in unmatched_firms if f not in matched_firm_ids]
+                
+                # Agent accepts if utility >= expected baseline
+                if worker_util < expected_baseline:
+                    continue
+                
+                # Match is finalized
+                firm_util = firm.utility(agent=agent, workers=self.workers, t=period)
+                headhunter_util = headhunter.utility_agent(firm, agent, self.workers, self.v_max, self.alpha)
+                
+                # Expected quality for display
+                expected_quality = sum(
+                    prob * self.workers[rank_idx].quality
+                    for rank_idx, prob in enumerate(agent.rank_distribution)
+                    if rank_idx < len(self.workers)
+                )
+                
+                matches.append(
+                    Match(
+                        worker_id=agent.agent_id,  # Store agent_id, will resolve to worker_id in period 1
+                        firm_id=firm.firm_id,
+                        period=period,
+                        headhunter_id=headhunter.headhunter_id,
+                        worker_utility=worker_util,
+                        firm_utility=firm_util,
+                        headhunter_utility=headhunter_util,
+                        expected_quality=expected_quality,
+                    )
+                )
+            
+            # Track unmatched
+            matched_agent_ids = {m.worker_id for m in matches}
+            matched_firm_ids = {m.firm_id for m in matches}
+            unmatched_workers_list = [w for w in unmatched_workers if w not in matched_agent_ids]
+            unmatched_firms_list = [f for f in unmatched_firms if f not in matched_firm_ids]
+            
+        else:
+            # Period 1: Use workers
+            # Step 1: Each headhunter proposes matches using enumerative algorithm
+            # (finds optimal matching that maximizes total headhunter utility)
+            headhunter_proposals: Dict[int, Dict[int, int]] = {}  # {headhunter_id: {worker_id: firm_id}}
+            
+            for headhunter in self.headhunters:
+                accessible_workers = [
+                    w_id for w_id in headhunter.worker_ids 
+                    if w_id in unmatched_workers
+                ]
+                accessible_firms = [
+                    f_id for f_id in headhunter.firm_ids 
+                    if f_id in unmatched_firms
+                ]
+                
+                if not accessible_workers or not accessible_firms:
+                    headhunter_proposals[headhunter.headhunter_id] = {}
+                    continue
+                
+                # Find optimal matching using selected algorithm
+                if self.matching_algorithm == "hungarian":
+                    optimal_matching = self._hungarian_optimal_matching_worker(
+                        headhunter, accessible_workers, accessible_firms
+                    )
+                else:  # enumerative
+                    optimal_matching = self._enumerate_optimal_matching_worker(
+                        headhunter, accessible_workers, accessible_firms
+                    )
+                
+                headhunter_proposals[headhunter.headhunter_id] = optimal_matching
+            
+            # Step 2: Firms observe all proposals and greedily choose best worker
+            firm_choices: Dict[int, Tuple[Worker, Headhunter]] = {}  # {firm_id: (worker, headhunter)}
+            
+            for headhunter_id, matching in headhunter_proposals.items():
+                headhunter = next(h for h in self.headhunters if h.headhunter_id == headhunter_id)
+                for worker_id, firm_id in matching.items():
+                    if worker_id not in unmatched_workers or firm_id not in unmatched_firms:
+                        continue
+                    
+                    worker = self.worker_dict[worker_id]
+                    firm = self.firm_dict[firm_id]
+                    firm_util = firm.utility(worker_quality=worker.quality, t=period)
+                    
+                    # Firm chooses best proposal (highest utility)
+                    if firm_id not in firm_choices:
+                        firm_choices[firm_id] = (worker, headhunter)
+                    else:
+                        current_worker, _ = firm_choices[firm_id]
+                        current_util = firm.utility(worker_quality=current_worker.quality, t=period)
+                        if firm_util > current_util:
+                            firm_choices[firm_id] = (worker, headhunter)
+            
+            # Step 3: Workers receive proposals and choose best, then compare to baseline
+            worker_proposals: Dict[int, List[Tuple[Firm, Headhunter, float]]] = {}
+            # {worker_id: [(firm, headhunter, worker_utility), ...]}
+            
+            for firm_id, (worker, headhunter) in firm_choices.items():
+                firm = self.firm_dict[firm_id]
+                worker_util = worker.utility(firm.value, period)
+                
+                if worker.worker_id not in worker_proposals:
+                    worker_proposals[worker.worker_id] = []
+                worker_proposals[worker.worker_id].append((firm, headhunter, worker_util))
+            
+            # Workers choose best proposal and accept if utility >= baseline
+            for worker_id, proposals in worker_proposals.items():
+                worker = self.worker_dict[worker_id]
+                
+                # Worker greedily chooses best proposal (highest worker utility)
+                best_proposal = max(proposals, key=lambda x: x[2])  # x[2] is worker_utility
+                firm, headhunter, worker_util = best_proposal
+                
+                # Worker accepts if utility >= baseline (outside option)
+                if worker_util < worker.baseline_utility:
+                    continue
+                
+                # Match is finalized
+                firm_util = firm.utility(worker_quality=worker.quality, t=period)
+                headhunter_util = headhunter.utility_worker(firm, worker, self.v_max, self.alpha)
+                
+                matches.append(
+                    Match(
+                        worker_id=worker.worker_id,
+                        firm_id=firm.firm_id,
+                        period=period,
+                        headhunter_id=headhunter.headhunter_id,
+                        worker_utility=worker_util,
+                        firm_utility=firm_util,
+                        headhunter_utility=headhunter_util,
+                        expected_quality=worker.quality,
+                    )
+                )
+            
+            # Track unmatched
+            matched_worker_ids = {m.worker_id for m in matches}
+            matched_firm_ids = {m.firm_id for m in matches}
+            unmatched_workers_list = [w for w in unmatched_workers if w not in matched_worker_ids]
+            unmatched_firms_list = [f for f in unmatched_firms if f not in matched_firm_ids]
         
         return PeriodResults(
             period=period,
@@ -360,20 +753,37 @@ class Market:
         """
         Run the two-period simulation.
         
+        Period 0: Agents with probability distributions over rankings
+        Period 1: Agents resolve to workers, true quality revealed
+        
         Returns results for both periods (t=0 and t=1).
         """
         results: List[PeriodResults] = []
         
-        # Period 0: Early phase
-        unmatched_workers = set(w.worker_id for w in self.workers)
+        # Create agents for period 0
+        self._create_agents()
+        
+        # Period 0: Early phase (use agent IDs, which match worker IDs)
+        unmatched_agents = set(a.agent_id for a in self.agents)
         unmatched_firms = set(f.firm_id for f in self.firms)
-        period_0_results = self._match_period(0, unmatched_workers, unmatched_firms)
+        period_0_results = self._match_period(0, unmatched_agents, unmatched_firms)
         results.append(period_0_results)
         
-        # Period 1: Regular phase (only unmatched workers/firms participate)
-        matched_in_0 = set(m.worker_id for m in period_0_results.matches)
+        # Resolve agents to workers for period 1
+        # Matched agents in period 0 are resolved to their worker assignments
+        matched_agent_ids_in_0 = set(m.worker_id for m in period_0_results.matches)
         matched_firms_in_0 = set(m.firm_id for m in period_0_results.matches)
-        unmatched_workers_1 = unmatched_workers - matched_in_0
+        
+        # Resolve all matched agents to workers
+        matched_worker_ids_in_0 = set()
+        for agent_id in matched_agent_ids_in_0:
+            worker_id = self._resolve_agent_to_worker(agent_id)
+            matched_worker_ids_in_0.add(worker_id)
+        
+        # Period 1: Regular phase (only unmatched workers/firms participate)
+        # Note: In period 1, we use actual worker IDs
+        all_worker_ids = set(w.worker_id for w in self.workers)
+        unmatched_workers_1 = all_worker_ids - matched_worker_ids_in_0
         unmatched_firms_1 = unmatched_firms - matched_firms_in_0
         
         period_1_results = self._match_period(1, unmatched_workers_1, unmatched_firms_1)

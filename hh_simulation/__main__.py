@@ -17,10 +17,9 @@ python -m hh_simulation \
     --num-workers 50 \
     --num-firms 20 \
     --num-headhunters 5 \
-    --delta-w 0.1 \
-    --delta-f 0.1 \
-    --delta-h 0.05 \
-    --signal-noise-std 0.2 \
+    --gamma 0.5 \
+    --alpha 0.1 \
+    --matching-algorithm hungarian \
     --seed 42
 '''
 
@@ -29,24 +28,27 @@ def run(
     num_workers: int = typer.Option(50, help="Number of workers"),
     num_firms: int = typer.Option(10, help="Number of firms"),
     num_headhunters: int = typer.Option(3, help="Number of headhunters"),
-    delta_w: float = typer.Option(0.1, help="Worker early signing bonus (δ_w)"),
-    delta_f: float = typer.Option(0.1, help="Firm benefit from early hiring (δ_f)"),
-    delta_h: float = typer.Option(0.05, help="Headhunter benefit from early placement (δ_h)"),
-    signal_noise_std: float = typer.Option(0.2, help="Standard deviation of signal noise at t=0 (σ)"),
+    gamma: float = typer.Option(0.5, help="Outside option scaling factor γ (baseline utility = γ * (quality/max_quality) * max_firm_value)"),
+    alpha: float = typer.Option(0.5, help="Headhunter utility weight α (u_h = α·μ + (1-α)·η)"),
+    matching_algorithm: str = typer.Option("hungarian", help="Matching algorithm: 'hungarian' (fast, O(n³)) or 'enumerative' (slow, O(2^n), but exhaustive)"),
     seed: Optional[int] = typer.Option(None, help="Random seed"),
 ) -> None:
     """Run a two-period market simulation."""
+    if matching_algorithm not in ["hungarian", "enumerative"]:
+        console.print(f"[red]Error: matching_algorithm must be 'hungarian' or 'enumerative', got '{matching_algorithm}'[/red]")
+        raise typer.Exit(1)
+    
     console.print("[bold blue]Two-Period Market Simulation[/bold blue]")
-    console.print(f"Workers: {num_workers}, Firms: {num_firms}, Headhunters: {num_headhunters}\n")
+    console.print(f"Workers: {num_workers}, Firms: {num_firms}, Headhunters: {num_headhunters}")
+    console.print(f"γ (gamma): {gamma}, α (alpha): {alpha}, Algorithm: {matching_algorithm}\n")
     
     market = Market.random_market(
         num_workers=num_workers,
         num_firms=num_firms,
         num_headhunters=num_headhunters,
-        delta_w=delta_w,
-        delta_f=delta_f,
-        delta_h=delta_h,
-        signal_noise_std=signal_noise_std,
+        gamma=gamma,
+        alpha=alpha,
+        matching_algorithm=matching_algorithm,
         seed=seed,
     )
     
@@ -65,22 +67,35 @@ def run(
             table.add_column("Worker", justify="right")
             table.add_column("Firm", justify="right")
             table.add_column("Headhunter", justify="right")
-            table.add_column("Observed Quality", justify="right", style="cyan")
+            table.add_column("Quality", justify="right", style="cyan")
             table.add_column("Worker Utility", justify="right", style="green")
             table.add_column("Firm Utility", justify="right", style="blue")
             table.add_column("Headhunter Utility", justify="right", style="magenta")
             
             for match in period_results.matches[:10]:  # Show first 10 matches
-                worker = market.worker_dict[match.worker_id]
-                table.add_row(
-                    f"W{match.worker_id} (q={worker.quality:.2f})",
-                    f"F{match.firm_id} (r={market.firm_dict[match.firm_id].prestige})",
-                    f"H{match.headhunter_id}" if match.headhunter_id is not None else "None",
-                    f"{match.observed_quality:.3f}",
-                    f"{match.worker_utility:.3f}",
-                    f"{match.firm_utility:.3f}",
-                    f"{match.headhunter_utility:.3f}",
-                )
+                if match.period == 0:
+                    # Period 0: Show agent ID and expected quality
+                    table.add_row(
+                        f"A{match.worker_id} (E[q]={match.expected_quality:.2f})",
+                        f"F{match.firm_id} (r={market.firm_dict[match.firm_id].prestige})",
+                        f"H{match.headhunter_id}" if match.headhunter_id is not None else "None",
+                        f"{match.expected_quality:.3f}",
+                        f"{match.worker_utility:.3f}",
+                        f"{match.firm_utility:.3f}",
+                        f"{match.headhunter_utility:.3f}",
+                    )
+                else:
+                    # Period 1: Show worker ID and true quality
+                    worker = market.worker_dict[match.worker_id]
+                    table.add_row(
+                        f"W{match.worker_id} (q={worker.quality:.2f})",
+                        f"F{match.firm_id} (r={market.firm_dict[match.firm_id].prestige})",
+                        f"H{match.headhunter_id}" if match.headhunter_id is not None else "None",
+                        f"{match.expected_quality:.3f}",
+                        f"{match.worker_utility:.3f}",
+                        f"{match.firm_utility:.3f}",
+                        f"{match.headhunter_utility:.3f}",
+                    )
             
             console.print(table)
             
@@ -92,7 +107,7 @@ def run(
     total_matches = sum(len(r.matches) for r in results)
     early_matches = len(results[0].matches)
     regular_matches = len(results[1].matches)
-    console.print(f"Total matches: {total_matches} ({100*total_matches/(num_workers):.1f}%)")
+    console.print(f"Total matches: {total_matches} ({100*total_matches/min(num_workers, num_firms):.1f}%)")
     console.print(f"Early phase matches: {early_matches} ({100*early_matches/total_matches:.1f}%)" if total_matches > 0 else "Early phase matches: 0")
     console.print(f"Regular phase matches: {regular_matches} ({100*regular_matches/total_matches:.1f}%)" if total_matches > 0 else "Regular phase matches: 0")
     
