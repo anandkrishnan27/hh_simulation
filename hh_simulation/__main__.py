@@ -16,7 +16,7 @@ Use below to run
 python -m hh_simulation \
     --num-workers 50 \
     --num-firms 20 \
-    --num-headhunters 5 \
+    --num-headhunters 1 \
     --gamma 0.5 \
     --alpha 0.1 \
     --matching-algorithm hungarian \

@@ -697,7 +697,9 @@ class Market:
                 firm, headhunter, worker_util = best_proposal
                 
                 # Worker accepts if utility >= baseline (outside option)
-                if worker_util < worker.baseline_utility:
+                # For period 1, heavily decrease the outside option (multiply by 0.1)
+                baseline_threshold = worker.baseline_utility * 0.1 if period == 1 else worker.baseline_utility
+                if worker_util < baseline_threshold:
                     continue
                 
                 # Match is finalized

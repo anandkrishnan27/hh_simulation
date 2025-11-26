@@ -143,6 +143,7 @@ class Headhunter:
         # Expected firm utility from agent: sum_k p_{jk} * q_k (same for all firms)
         expected_firm_util = firm.utility(agent=agent, workers=workers, t=0)
         return (v_max - firm.value) * expected_firm_util
+        return v_max - firm.value
     
     def _compute_match_quality_worker(self, firm: Firm, worker: Worker) -> float:
         """
@@ -163,6 +164,7 @@ class Headhunter:
         """
         firm_util = firm.utility(worker_quality=worker.quality, t=1)
         return (v_max - firm.value) * firm_util
+        return v_max - firm.value
     
     def utility_agent(self, firm: Firm, agent: Agent, workers: List[Worker], v_max: float, alpha: float) -> float:
         """
