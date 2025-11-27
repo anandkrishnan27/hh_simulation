@@ -6,5 +6,7 @@ pydantic>=2.0
 typer[all]>=0.9
 rich>=13.0
 pytest>=7.0
+matplotlib>=3.7
+tqdm>=4.65
 
 
