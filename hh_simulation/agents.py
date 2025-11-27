@@ -63,6 +63,7 @@ class Firm:
     firm_id: int
     prestige: int  # Prestige rank: 1 is highest, m is lowest (f_1 > f_2 > ... > f_m)
     value: float  # v(i): Worker valuation of firm i (cardinal value, same for all workers)
+    baseline_utility: float = 0.0  # Outside option utility = γ * (value / max_value) * max_w q(w)
     
     def utility(
         self, 
@@ -142,8 +143,8 @@ class Headhunter:
         """
         # Expected firm utility from agent: sum_k p_{jk} * q_k (same for all firms)
         expected_firm_util = firm.utility(agent=agent, workers=workers, t=0)
-        return (v_max - firm.value) * expected_firm_util
-        return v_max - firm.value
+        # return (v_max - firm.value) * expected_firm_util
+        return (v_max - firm.value)
     
     def _compute_match_quality_worker(self, firm: Firm, worker: Worker) -> float:
         """
@@ -163,8 +164,8 @@ class Headhunter:
         where u_f(w_j) = q_j for all firms f (common preferences)
         """
         firm_util = firm.utility(worker_quality=worker.quality, t=1)
-        return (v_max - firm.value) * firm_util
-        return v_max - firm.value
+        # return (v_max - firm.value) * firm_util
+        return (v_max - firm.value)
     
     def utility_agent(self, firm: Firm, agent: Agent, workers: List[Worker], v_max: float, alpha: float) -> float:
         """

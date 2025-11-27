@@ -6,6 +6,7 @@ import random
 import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.stats import poisson
 
 from .agents import Worker, Firm, Headhunter, Agent
 
@@ -95,11 +96,20 @@ class Market:
             quality_ratio = worker.quality / max_quality if max_quality > 0 else 0.0
             worker.baseline_utility = self.gamma * quality_ratio * max_firm_value
         
+        # Set baseline utility for each firm based on their value
+        # Higher value firms have better outside options
+        max_firm_value_for_baseline = max(f.value for f in self.firms) if self.firms else 1.0
+        for firm in self.firms:
+            value_ratio = firm.value / max_firm_value_for_baseline if max_firm_value_for_baseline > 0 else 0.0
+            firm.baseline_utility = self.gamma * value_ratio * max_quality
+        
         # Create agents for period 0 (will be created in _create_agents)
         self.agents: List[Agent] = []
         self.agent_dict: Dict[int, Agent] = {}
         # Mapping from agent_id to worker_id (resolved in period 1)
         self.agent_to_worker: Dict[int, int] = {}
+        # Mapping from headhunter_id to set of agent_ids accessible in period 0
+        self.headhunter_agent_ids: Dict[int, Set[int]] = {}
     
     @staticmethod
     def random_market(
@@ -201,11 +211,8 @@ class Market:
                 distance = abs(rank_idx - assigned_worker_rank)
                 # Poisson PMF: P(k; λ) = (λ^k * e^(-λ)) / k!
                 # We use distance as k, so probability decreases with distance
-                if distance == 0:
-                    prob = np.exp(-poisson_lambda)  # P(0; λ)
-                else:
-                    # For k > 0: (λ^k * e^(-λ)) / k!
-                    prob = (poisson_lambda ** distance) * np.exp(-poisson_lambda) / math.factorial(distance)
+                # Use scipy.stats.poisson.pmf to avoid overflow with large factorials
+                prob = poisson.pmf(distance, poisson_lambda)
                 probs[rank_idx] = prob
             
             # Normalize to ensure probabilities sum to 1 (truncated Poisson)
@@ -235,6 +242,83 @@ class Market:
         self.agent_to_worker[agent_id] = worker_id
         return worker_id
     
+    def _get_headhunter_agent_ids(self, headhunter: Headhunter) -> Set[int]:
+        """
+        Get the set of agent IDs that a headhunter has access to in period 0.
+        
+        A headhunter has access to agents whose assigned worker (via assigned_worker_rank)
+        has a worker_id that is in the headhunter's worker_ids set.
+        
+        Args:
+            headhunter: The headhunter to get agent IDs for
+            
+        Returns:
+            Set of agent IDs accessible to this headhunter in period 0
+        """
+        if not self.agents:
+            self._create_agents()
+        
+        accessible_agent_ids = set()
+        for agent in self.agents:
+            # Get the worker_id that this agent is assigned to
+            assigned_worker_id = self.workers[agent.assigned_worker_rank].worker_id
+            # If this worker_id is in the headhunter's worker_ids, the agent is accessible
+            if assigned_worker_id in headhunter.worker_ids:
+                accessible_agent_ids.add(agent.agent_id)
+        
+        return accessible_agent_ids
+    
+    def _get_headhunter_worker_ids_from_agents(self, headhunter_id: int) -> Set[int]:
+        """
+        Get the set of worker IDs that a headhunter has access to in period 1.
+        
+        This is determined by resolving the agents that the headhunter had access to
+        in period 0 to their corresponding workers.
+        
+        Args:
+            headhunter_id: The headhunter ID to get worker IDs for
+            
+        Returns:
+            Set of worker IDs accessible to this headhunter in period 1
+        """
+        if headhunter_id not in self.headhunter_agent_ids:
+            # If we don't have agent IDs for this headhunter, return empty set
+            return set()
+        
+        accessible_worker_ids = set()
+        for agent_id in self.headhunter_agent_ids[headhunter_id]:
+            worker_id = self._resolve_agent_to_worker(agent_id)
+            accessible_worker_ids.add(worker_id)
+        
+        return accessible_worker_ids
+    
+    def _can_match_agent(self, headhunter: Headhunter, firm_id: int, agent_id: int) -> bool:
+        """
+        Check if a headhunter can match a firm and agent in period 0.
+        
+        This checks:
+        1. The firm_id is in the headhunter's firm_ids
+        2. The agent_id corresponds to an agent whose assigned worker is in the headhunter's worker_ids
+        
+        Args:
+            headhunter: The headhunter
+            firm_id: The firm ID
+            agent_id: The agent ID
+            
+        Returns:
+            True if the headhunter can match this firm and agent
+        """
+        # Check firm access
+        if firm_id not in headhunter.firm_ids:
+            return False
+        
+        # Check agent access - agent must be in the headhunter's accessible agents
+        # Get agent IDs if not already stored
+        if headhunter.headhunter_id not in self.headhunter_agent_ids:
+            self.headhunter_agent_ids[headhunter.headhunter_id] = self._get_headhunter_agent_ids(headhunter)
+        
+        return agent_id in self.headhunter_agent_ids[headhunter.headhunter_id]
+    
     def _enumerate_optimal_matching_agent(
         self,
         headhunter: Headhunter,
@@ -253,7 +337,7 @@ class Market:
         valid_pairs = []
         for agent_id in accessible_agents:
             for firm_id in accessible_firms:
-                if headhunter.can_match(firm_id, agent_id):
+                if self._can_match_agent(headhunter, firm_id, agent_id):
                     agent = self.agent_dict[agent_id]
                     firm = self.firm_dict[firm_id]
                     utility = headhunter.utility_agent(firm, agent, self.workers, self.v_max, self.alpha)
@@ -409,7 +493,7 @@ class Market:
         # Fill in valid pairs with negative utility (we want to maximize, Hungarian minimizes)
         for agent_id in accessible_agents:
             for firm_id in accessible_firms:
-                if headhunter.can_match(firm_id, agent_id):
+                if self._can_match_agent(headhunter, firm_id, agent_id):
                     agent = self.agent_dict[agent_id]
                     firm = self.firm_dict[firm_id]
                     utility = headhunter.utility_agent(firm, agent, self.workers, self.v_max, self.alpha)
@@ -426,7 +510,7 @@ class Market:
                 agent_id = accessible_agents[row_idx]
                 firm_id = accessible_firms[col_idx]
                 # Only include if it's a valid match and has positive utility
-                if headhunter.can_match(firm_id, agent_id) and cost_matrix[row_idx, col_idx] < 0:
+                if self._can_match_agent(headhunter, firm_id, agent_id) and cost_matrix[row_idx, col_idx] < 0:
                     matching[agent_id] = firm_id
         
         return matching
@@ -511,8 +595,14 @@ class Market:
             headhunter_proposals: Dict[int, Dict[int, int]] = {}  # {headhunter_id: {agent_id: firm_id}}
             
             for headhunter in self.headhunters:
+                # Get the set of agent IDs this headhunter has access to (based on worker_ids)
+                all_accessible_agent_ids = self._get_headhunter_agent_ids(headhunter)
+                # Store this for use in period 1
+                self.headhunter_agent_ids[headhunter.headhunter_id] = all_accessible_agent_ids
+                
+                # Filter to only unmatched agents
                 accessible_agents = [
-                    a_id for a_id in headhunter.worker_ids 
+                    a_id for a_id in all_accessible_agent_ids 
                     if a_id in unmatched_agents
                 ]
                 accessible_firms = [
@@ -557,6 +647,17 @@ class Market:
                         current_util = firm.utility(agent=current_agent, workers=self.workers, t=period)
                         if firm_util > current_util:
                             firm_choices[firm_id] = (agent, headhunter)
+            
+            # Filter firm choices: firms only accept if utility >= baseline
+            # For period 0, use expected baseline (same as workers)
+            firm_choices_filtered: Dict[int, Tuple[Agent, Headhunter]] = {}
+            for firm_id, (agent, headhunter) in firm_choices.items():
+                firm = self.firm_dict[firm_id]
+                firm_util = firm.utility(agent=agent, workers=self.workers, t=period)
+                # Firm accepts if utility >= baseline
+                if firm_util >= firm.baseline_utility:
+                    firm_choices_filtered[firm_id] = (agent, headhunter)
+            firm_choices = firm_choices_filtered
             
             # Step 3: Agents receive proposals and choose best, then compare to baseline
             # For agents, we need to compute expected worker utility
@@ -629,8 +730,13 @@ class Market:
             headhunter_proposals: Dict[int, Dict[int, int]] = {}  # {headhunter_id: {worker_id: firm_id}}
             
             for headhunter in self.headhunters:
+                # Get the set of worker IDs this headhunter has access to in period 1
+                # This is determined by resolving the agents it had access to in period 0
+                all_accessible_worker_ids = self._get_headhunter_worker_ids_from_agents(headhunter.headhunter_id)
+                
+                # Filter to only unmatched workers
                 accessible_workers = [
-                    w_id for w_id in headhunter.worker_ids 
+                    w_id for w_id in all_accessible_worker_ids 
                     if w_id in unmatched_workers
                 ]
                 accessible_firms = [
@@ -675,6 +781,18 @@ class Market:
                         current_util = firm.utility(worker_quality=current_worker.quality, t=period)
                         if firm_util > current_util:
                             firm_choices[firm_id] = (worker, headhunter)
+            
+            # Filter firm choices: firms only accept if utility >= baseline
+            # For period 1, heavily decrease the outside option (multiply by 0.1)
+            firm_choices_filtered: Dict[int, Tuple[Worker, Headhunter]] = {}
+            for firm_id, (worker, headhunter) in firm_choices.items():
+                firm = self.firm_dict[firm_id]
+                firm_util = firm.utility(worker_quality=worker.quality, t=period)
+                baseline_threshold = firm.baseline_utility * 0.1 if period == 1 else firm.baseline_utility
+                # Firm accepts if utility >= baseline
+                if firm_util >= baseline_threshold:
+                    firm_choices_filtered[firm_id] = (worker, headhunter)
+            firm_choices = firm_choices_filtered
             
             # Step 3: Workers receive proposals and choose best, then compare to baseline
             worker_proposals: Dict[int, List[Tuple[Firm, Headhunter, float]]] = {}
