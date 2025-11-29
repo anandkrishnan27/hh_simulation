@@ -84,10 +84,14 @@ def run_experiment_1(
     - match_welfare: List of total match welfare for each count
     - avg_worker_rank_diff: List of average absolute rank differences for workers
     - avg_firm_rank_diff: List of average absolute rank differences for firms
+    - early_matches: List of number of matches in early period (t=0)
+    - regular_matches: List of number of matches in regular period (t=1)
     """
     results = {
         "num_headhunters": [],
         "total_matches": [],
+        "early_matches": [],
+        "regular_matches": [],
         "headhunter_welfare": [],
         "firm_welfare": [],
         "worker_welfare": [],
@@ -114,8 +118,14 @@ def run_experiment_1(
         
         # Collect all matches across both periods
         all_matches = []
+        early_matches = []
+        regular_matches = []
         for pr in period_results:
             all_matches.extend(pr.matches)
+            if pr.period == 0:
+                early_matches = pr.matches
+            else:
+                regular_matches = pr.matches
         
         # Calculate welfare
         welfare = market.calculate_welfare(all_matches)
@@ -126,6 +136,8 @@ def run_experiment_1(
         # Store results
         results["num_headhunters"].append(num_headhunters)
         results["total_matches"].append(len(all_matches))
+        results["early_matches"].append(len(early_matches))
+        results["regular_matches"].append(len(regular_matches))
         results["headhunter_welfare"].append(welfare.headhunter_welfare)
         results["firm_welfare"].append(welfare.firm_welfare)
         results["worker_welfare"].append(welfare.worker_welfare)
@@ -159,10 +171,14 @@ def run_experiment_2(
     - match_welfare: List of total match welfare for each alpha
     - avg_worker_rank_diff: List of average absolute rank differences for workers
     - avg_firm_rank_diff: List of average absolute rank differences for firms
+    - early_matches: List of number of matches in early period (t=0)
+    - regular_matches: List of number of matches in regular period (t=1)
     """
     results = {
         "alpha": [],
         "total_matches": [],
+        "early_matches": [],
+        "regular_matches": [],
         "headhunter_welfare": [],
         "firm_welfare": [],
         "worker_welfare": [],
@@ -192,8 +208,14 @@ def run_experiment_2(
         
         # Collect all matches across both periods
         all_matches = []
+        early_matches = []
+        regular_matches = []
         for pr in period_results:
             all_matches.extend(pr.matches)
+            if pr.period == 0:
+                early_matches = pr.matches
+            else:
+                regular_matches = pr.matches
         
         # Calculate welfare
         welfare = market.calculate_welfare(all_matches)
@@ -204,6 +226,8 @@ def run_experiment_2(
         # Store results
         results["alpha"].append(alpha)
         results["total_matches"].append(len(all_matches))
+        results["early_matches"].append(len(early_matches))
+        results["regular_matches"].append(len(regular_matches))
         results["headhunter_welfare"].append(welfare.headhunter_welfare)
         results["firm_welfare"].append(welfare.firm_welfare)
         results["worker_welfare"].append(welfare.worker_welfare)
@@ -304,6 +328,82 @@ def plot_experiment_2(results: Dict[str, List], save_dir: str = "hh_simulation/g
     plt.close()
 
 
+def plot_early_vs_regular_matches_headhunters(results: Dict[str, List], save_dir: str = "hh_simulation/graphs") -> None:
+    """Plot early vs regular period matches for Experiment 1 (varying headhunters)."""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    fig.suptitle("Experiment 1: Early vs Regular Period Matches\n(Baseline: 200 workers, 50 firms, γ=0.75, α=0.5)", 
+                 fontsize=14, fontweight='bold')
+    
+    num_headhunters = results["num_headhunters"]
+    
+    # Calculate percentages
+    percent_early = []
+    percent_regular = []
+    for i in range(len(num_headhunters)):
+        total = results["total_matches"][i]
+        if total > 0:
+            percent_early.append((results["early_matches"][i] / total) * 100)
+            percent_regular.append((results["regular_matches"][i] / total) * 100)
+        else:
+            percent_early.append(0.0)
+            percent_regular.append(0.0)
+    
+    ax.plot(num_headhunters, percent_early, 'b-', linewidth=2, marker='o', markersize=4, label='Early Period (t=0)')
+    ax.plot(num_headhunters, percent_regular, 'r-', linewidth=2, marker='s', markersize=4, label='Regular Period (t=1)')
+    ax.set_xlabel("Number of Headhunters")
+    ax.set_ylabel("Percentage of Matches (%)")
+    ax.set_title("Percentage of Matches in Early vs Regular Period")
+    ax.set_ylim(0, 100)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, "experiment_1_early_vs_regular_matches.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Saved plot to {save_path}")
+    plt.close()
+
+
+def plot_early_vs_regular_matches_alpha(results: Dict[str, List], save_dir: str = "hh_simulation/graphs") -> None:
+    """Plot early vs regular period matches for Experiment 2 (varying alpha)."""
+    os.makedirs(save_dir, exist_ok=True)
+    
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    fig.suptitle("Experiment 2: Early vs Regular Period Matches\n(Baseline: 200 workers, 50 firms, 10 headhunters, γ=0.75)", 
+                 fontsize=14, fontweight='bold')
+    
+    alpha = results["alpha"]
+    
+    # Calculate percentages
+    percent_early = []
+    percent_regular = []
+    for i in range(len(alpha)):
+        total = results["total_matches"][i]
+        if total > 0:
+            percent_early.append((results["early_matches"][i] / total) * 100)
+            percent_regular.append((results["regular_matches"][i] / total) * 100)
+        else:
+            percent_early.append(0.0)
+            percent_regular.append(0.0)
+    
+    ax.plot(alpha, percent_early, 'b-', linewidth=2, marker='o', markersize=2, label='Early Period (t=0)')
+    ax.plot(alpha, percent_regular, 'r-', linewidth=2, marker='s', markersize=2, label='Regular Period (t=1)')
+    ax.set_xlabel("Alpha (α)")
+    ax.set_ylabel("Percentage of Matches (%)")
+    ax.set_title("Percentage of Matches in Early vs Regular Period")
+    ax.set_ylim(0, 100)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, "experiment_2_early_vs_regular_matches.png")
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Saved plot to {save_path}")
+    plt.close()
+
+
 def save_experiment_1_csv(results: Dict[str, List], save_dir: str = "hh_simulation/graphs") -> None:
     """Save Experiment 1 results to CSV."""
     os.makedirs(save_dir, exist_ok=True)
@@ -316,6 +416,8 @@ def save_experiment_1_csv(results: Dict[str, List], save_dir: str = "hh_simulati
         writer.writerow([
             "num_headhunters",
             "total_matches",
+            "early_matches",
+            "regular_matches",
             "headhunter_welfare",
             "firm_welfare",
             "worker_welfare",
@@ -329,6 +431,8 @@ def save_experiment_1_csv(results: Dict[str, List], save_dir: str = "hh_simulati
             writer.writerow([
                 results["num_headhunters"][i],
                 results["total_matches"][i],
+                results["early_matches"][i],
+                results["regular_matches"][i],
                 results["headhunter_welfare"][i],
                 results["firm_welfare"][i],
                 results["worker_welfare"][i],
@@ -352,6 +456,8 @@ def save_experiment_2_csv(results: Dict[str, List], save_dir: str = "hh_simulati
         writer.writerow([
             "alpha",
             "total_matches",
+            "early_matches",
+            "regular_matches",
             "headhunter_welfare",
             "firm_welfare",
             "worker_welfare",
@@ -365,6 +471,8 @@ def save_experiment_2_csv(results: Dict[str, List], save_dir: str = "hh_simulati
             writer.writerow([
                 results["alpha"][i],
                 results["total_matches"][i],
+                results["early_matches"][i],
+                results["regular_matches"][i],
                 results["headhunter_welfare"][i],
                 results["firm_welfare"][i],
                 results["worker_welfare"][i],
@@ -412,6 +520,7 @@ def run_all_experiments(
         seed=seed,
     )
     plot_experiment_1(results_1, save_dir=save_dir)
+    plot_early_vs_regular_matches_headhunters(results_1, save_dir=save_dir)
     save_experiment_1_csv(results_1, save_dir=save_dir)
     
     print("\n" + "=" * 60)
@@ -426,6 +535,7 @@ def run_all_experiments(
         seed=seed,
     )
     plot_experiment_2(results_2, save_dir=save_dir)
+    plot_early_vs_regular_matches_alpha(results_2, save_dir=save_dir)
     save_experiment_2_csv(results_2, save_dir=save_dir)
     
     print("\n" + "=" * 60)

@@ -152,12 +152,30 @@ class Market:
         for i, firm in enumerate(firms):
             firm.prestige = i + 1
         
-        # Create headhunters with random subsets of firms and workers
+        # Create headhunters with disjoint subsets of firms, random subsets of workers
+        # Firms are partitioned so each is assigned to exactly one headhunter
+        # Workers can overlap between headhunters (random subsets)
         headhunters = []
+        
+        # Create shuffled list of firm IDs for disjoint partitioning
+        firm_id_list = list(range(num_firms))
+        rng.shuffle(firm_id_list)
+        
+        # Partition firms among headhunters (as evenly as possible, disjoint)
+        firms_per_headhunter = num_firms // num_headhunters
+        firms_remainder = num_firms % num_headhunters
+        
+        firm_idx = 0
+        
         for h_id in range(num_headhunters):
-            num_firms_accessible = rng.randint(num_firms // 2, num_firms)
-            firm_ids = set(rng.sample(range(num_firms), num_firms_accessible))
+            # Calculate number of firms for this headhunter
+            num_firms_for_h = firms_per_headhunter + (1 if h_id < firms_remainder else 0)
             
+            # Assign firms disjointly
+            firm_ids = set(firm_id_list[firm_idx:firm_idx + num_firms_for_h])
+            firm_idx += num_firms_for_h
+            
+            # Assign workers randomly (allows overlap between headhunters)
             num_workers_accessible = rng.randint(num_workers // 2, num_workers)
             worker_ids = set(rng.sample(range(num_workers), num_workers_accessible))
             
