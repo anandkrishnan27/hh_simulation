@@ -7,15 +7,7 @@ import matplotlib.pyplot as plt
 
 
 def read_csv_file(csv_path: str) -> Dict[str, List]:
-    """
-    Read a CSV file and return a dictionary with column names as keys.
-    
-    Args:
-        csv_path: Path to the CSV file
-        
-    Returns:
-        Dictionary with column names as keys and lists of values as values
-    """
+    """Read a CSV and return a column-wise dictionary."""
     results = {}
     
     with open(csv_path, 'r') as csvfile:
@@ -40,13 +32,7 @@ def read_csv_file(csv_path: str) -> Dict[str, List]:
 
 
 def plot_experiment_1_from_csv(csv_path: str, save_path: str = None) -> None:
-    """
-    Plot Experiment 1 results from CSV file.
-    
-    Args:
-        csv_path: Path to the CSV file
-        save_path: Optional path to save the plot. If None, saves next to CSV with .png extension
-    """
+    """Plot Experiment 1 results stored in a CSV."""
     results = read_csv_file(csv_path)
     
     if save_path is None:
@@ -93,13 +79,7 @@ def plot_experiment_1_from_csv(csv_path: str, save_path: str = None) -> None:
 
 
 def plot_experiment_2_from_csv(csv_path: str, save_path: str = None) -> None:
-    """
-    Plot Experiment 2 results from CSV file.
-    
-    Args:
-        csv_path: Path to the CSV file
-        save_path: Optional path to save the plot. If None, saves next to CSV with .png extension
-    """
+    """Plot Experiment 2 results stored in a CSV."""
     results = read_csv_file(csv_path)
     
     if save_path is None:
@@ -146,14 +126,7 @@ def plot_experiment_2_from_csv(csv_path: str, save_path: str = None) -> None:
 
 
 def plot_rank_differences_from_csv(csv_path: str, save_path: str = None, experiment_name: str = None) -> None:
-    """
-    Plot rank difference metrics from CSV file.
-    
-    Args:
-        csv_path: Path to the CSV file
-        save_path: Optional path to save the plot. If None, saves next to CSV with _rank_diff.png extension
-        experiment_name: Optional name for the experiment (for title)
-    """
+    """Plot rank-difference metrics from a CSV."""
     results = read_csv_file(csv_path)
     
     if save_path is None:
@@ -200,12 +173,7 @@ def plot_rank_differences_from_csv(csv_path: str, save_path: str = None, experim
 
 
 def plot_all_from_csvs(graphs_dir: str = "hh_simulation/graphs") -> None:
-    """
-    Plot all graphs from CSV files in the graphs directory.
-    
-    Args:
-        graphs_dir: Directory containing the CSV files
-    """
+    """Generate every graph found in the graphs directory."""
     exp1_csv = os.path.join(graphs_dir, "experiment_1_headhunters.csv")
     exp2_csv = os.path.join(graphs_dir, "experiment_2_alpha.csv")
     

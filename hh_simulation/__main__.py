@@ -33,7 +33,7 @@ def run(
     matching_algorithm: str = typer.Option("hungarian", help="Matching algorithm: 'hungarian' (fast, O(n³)) or 'enumerative' (slow, O(2^n), but exhaustive)"),
     seed: Optional[int] = typer.Option(None, help="Random seed"),
 ) -> None:
-    """Run a two-period market simulation."""
+    """Run the two-period market simulation."""
     if matching_algorithm not in ["hungarian", "enumerative"]:
         console.print(f"[red]Error: matching_algorithm must be 'hungarian' or 'enumerative', got '{matching_algorithm}'[/red]")
         raise typer.Exit(1)
