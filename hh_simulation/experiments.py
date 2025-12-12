@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import csv
 import multiprocessing
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -13,26 +13,39 @@ from .market import Market
 
 "python -m hh_simulation.experiments"
 
-DEFAULT_NUM_WORKERS = 3000
-DEFAULT_NUM_FIRMS = 750
+DEFAULT_NUM_WORKERS = 500
+DEFAULT_NUM_FIRMS = 125
 
-def calculate_rank_differences(market: Market, period_results: List) -> Tuple[float, float]:
-    """Return the average absolute rank gaps for workers and firms."""
+def calculate_rank_differences(market: Market, period_results: List, period: Optional[int] = None) -> float:
+    """Return the average absolute normalized rank gap between workers and firms.
+    
+    Args:
+        market: The market object
+        period_results: List of PeriodResults
+        period: Optional period filter (0 for early, 1 for regular, None for all)
+    
+    Returns:
+        Average normalized rank difference
+    """
     # Map worker_id -> rank (1-indexed). Workers are pre-sorted by quality.
     worker_rank_map = {}
     for rank_idx, worker in enumerate(market.workers):
         worker_rank_map[worker.worker_id] = rank_idx + 1
     
-    # Collect all matches across both periods
+    # Get number of workers and firms for normalization
+    num_workers = len(market.workers)
+    num_firms = len(market.firms)
+    
+    # Collect matches, optionally filtered by period
     all_matches = []
     for pr in period_results:
-        all_matches.extend(pr.matches)
+        if period is None or pr.period == period:
+            all_matches.extend(pr.matches)
     
     if not all_matches:
-        return 0.0, 0.0
+        return 0.0
     
-    worker_rank_diffs = []
-    firm_rank_diffs = []
+    rank_diffs = []
     
     for match in all_matches:
         # Get worker_id (resolve agent_id if period 0)
@@ -51,15 +64,17 @@ def calculate_rank_differences(market: Market, period_results: List) -> Tuple[fl
         firm_rank = firm.prestige  # Prestige is already 1-indexed
         
         if worker_rank > 0:  # Only if worker was found
-            # Calculate absolute difference
-            rank_diff = abs(worker_rank - firm_rank)
-            worker_rank_diffs.append(rank_diff)
-            firm_rank_diffs.append(rank_diff)  # Same difference from firm's perspective
+            # Normalize ranks
+            normalized_worker_rank = worker_rank / num_workers
+            normalized_firm_rank = firm_rank / num_firms
+            
+            # Calculate absolute difference between normalized ranks
+            rank_diff = abs(normalized_worker_rank - normalized_firm_rank)
+            rank_diffs.append(rank_diff)
     
-    avg_worker_rank_diff = np.mean(worker_rank_diffs) if worker_rank_diffs else 0.0
-    avg_firm_rank_diff = np.mean(firm_rank_diffs) if firm_rank_diffs else 0.0
+    avg_rank_diff = np.mean(rank_diffs) if rank_diffs else 0.0
     
-    return avg_worker_rank_diff, avg_firm_rank_diff
+    return avg_rank_diff
 
 
 def _run_single_simulation_experiment_1(
@@ -97,8 +112,10 @@ def _run_single_simulation_experiment_1(
     # Calculate welfare
     welfare = market.calculate_welfare(all_matches)
     
-    # Calculate rank differences
-    avg_worker_rank_diff, avg_firm_rank_diff = calculate_rank_differences(market, period_results)
+    # Calculate rank differences (normalized) for overall, period 0, and period 1
+    avg_rank_diff_overall = calculate_rank_differences(market, period_results, period=None)
+    avg_rank_diff_period0 = calculate_rank_differences(market, period_results, period=0)
+    avg_rank_diff_period1 = calculate_rank_differences(market, period_results, period=1)
     
     # Return results
     result = {
@@ -110,8 +127,10 @@ def _run_single_simulation_experiment_1(
         "firm_welfare": welfare.firm_welfare,
         "worker_welfare": welfare.worker_welfare,
         "match_welfare": welfare.match_welfare,
-        "avg_worker_rank_diff": avg_worker_rank_diff,
-        "avg_firm_rank_diff": avg_firm_rank_diff,
+        "avg_worker_rank_diff": avg_rank_diff_overall,
+        "avg_firm_rank_diff": avg_rank_diff_overall,
+        "avg_rank_diff_period0": avg_rank_diff_period0,
+        "avg_rank_diff_period1": avg_rank_diff_period1,
     }
     
     return num_headhunters, result
@@ -138,6 +157,8 @@ def run_experiment_1(
         "match_welfare": [],
         "avg_worker_rank_diff": [],
         "avg_firm_rank_diff": [],
+        "avg_rank_diff_period0": [],
+        "avg_rank_diff_period1": [],
     }
     
     # Prepare arguments for parallel execution
@@ -178,6 +199,8 @@ def run_experiment_1(
         results["match_welfare"].append(result["match_welfare"])
         results["avg_worker_rank_diff"].append(result["avg_worker_rank_diff"])
         results["avg_firm_rank_diff"].append(result["avg_firm_rank_diff"])
+        results["avg_rank_diff_period0"].append(result["avg_rank_diff_period0"])
+        results["avg_rank_diff_period1"].append(result["avg_rank_diff_period1"])
     
     return results
 
@@ -217,8 +240,10 @@ def _run_single_simulation_experiment_2(
     # Calculate welfare
     welfare = market.calculate_welfare(all_matches)
     
-    # Calculate rank differences
-    avg_worker_rank_diff, avg_firm_rank_diff = calculate_rank_differences(market, period_results)
+    # Calculate rank differences (normalized) for overall, period 0, and period 1
+    avg_rank_diff_overall = calculate_rank_differences(market, period_results, period=None)
+    avg_rank_diff_period0 = calculate_rank_differences(market, period_results, period=0)
+    avg_rank_diff_period1 = calculate_rank_differences(market, period_results, period=1)
     
     # Return results
     result = {
@@ -230,8 +255,10 @@ def _run_single_simulation_experiment_2(
         "firm_welfare": welfare.firm_welfare,
         "worker_welfare": welfare.worker_welfare,
         "match_welfare": welfare.match_welfare,
-        "avg_worker_rank_diff": avg_worker_rank_diff,
-        "avg_firm_rank_diff": avg_firm_rank_diff,
+        "avg_worker_rank_diff": avg_rank_diff_overall,
+        "avg_firm_rank_diff": avg_rank_diff_overall,
+        "avg_rank_diff_period0": avg_rank_diff_period0,
+        "avg_rank_diff_period1": avg_rank_diff_period1,
     }
     
     return alpha, result
@@ -261,6 +288,8 @@ def run_experiment_2(
         "match_welfare": [],
         "avg_worker_rank_diff": [],
         "avg_firm_rank_diff": [],
+        "avg_rank_diff_period0": [],
+        "avg_rank_diff_period1": [],
     }
     
     # Generate alpha values
@@ -302,6 +331,8 @@ def run_experiment_2(
         results["match_welfare"].append(result["match_welfare"])
         results["avg_worker_rank_diff"].append(result["avg_worker_rank_diff"])
         results["avg_firm_rank_diff"].append(result["avg_firm_rank_diff"])
+        results["avg_rank_diff_period0"].append(result["avg_rank_diff_period0"])
+        results["avg_rank_diff_period1"].append(result["avg_rank_diff_period1"])
     
     return results
 
@@ -341,8 +372,10 @@ def _run_single_simulation_experiment_3(
     # Calculate welfare
     welfare = market.calculate_welfare(all_matches)
     
-    # Calculate rank differences
-    avg_worker_rank_diff, avg_firm_rank_diff = calculate_rank_differences(market, period_results)
+    # Calculate rank differences (normalized) for overall, period 0, and period 1
+    avg_rank_diff_overall = calculate_rank_differences(market, period_results, period=None)
+    avg_rank_diff_period0 = calculate_rank_differences(market, period_results, period=0)
+    avg_rank_diff_period1 = calculate_rank_differences(market, period_results, period=1)
     
     # Return results
     result = {
@@ -354,8 +387,10 @@ def _run_single_simulation_experiment_3(
         "firm_welfare": welfare.firm_welfare,
         "worker_welfare": welfare.worker_welfare,
         "match_welfare": welfare.match_welfare,
-        "avg_worker_rank_diff": avg_worker_rank_diff,
-        "avg_firm_rank_diff": avg_firm_rank_diff,
+        "avg_worker_rank_diff": avg_rank_diff_overall,
+        "avg_firm_rank_diff": avg_rank_diff_overall,
+        "avg_rank_diff_period0": avg_rank_diff_period0,
+        "avg_rank_diff_period1": avg_rank_diff_period1,
     }
     
     return gamma, result
@@ -385,6 +420,8 @@ def run_experiment_3(
         "match_welfare": [],
         "avg_worker_rank_diff": [],
         "avg_firm_rank_diff": [],
+        "avg_rank_diff_period0": [],
+        "avg_rank_diff_period1": [],
     }
     
     # Generate gamma values
@@ -426,6 +463,8 @@ def run_experiment_3(
         results["match_welfare"].append(result["match_welfare"])
         results["avg_worker_rank_diff"].append(result["avg_worker_rank_diff"])
         results["avg_firm_rank_diff"].append(result["avg_firm_rank_diff"])
+        results["avg_rank_diff_period0"].append(result["avg_rank_diff_period0"])
+        results["avg_rank_diff_period1"].append(result["avg_rank_diff_period1"])
     
     return results
 
@@ -551,6 +590,8 @@ def save_experiment_1_csv(results: Dict[str, List], save_dir: str = "hh_simulati
             "match_welfare",
             "avg_worker_rank_diff",
             "avg_firm_rank_diff",
+            "avg_rank_diff_period0",
+            "avg_rank_diff_period1",
         ])
         
         # Write data rows
@@ -566,6 +607,8 @@ def save_experiment_1_csv(results: Dict[str, List], save_dir: str = "hh_simulati
                 results["match_welfare"][i],
                 results["avg_worker_rank_diff"][i],
                 results["avg_firm_rank_diff"][i],
+                results["avg_rank_diff_period0"][i],
+                results["avg_rank_diff_period1"][i],
             ])
     
     print(f"Saved CSV to {csv_path}")
@@ -591,6 +634,8 @@ def save_experiment_2_csv(results: Dict[str, List], save_dir: str = "hh_simulati
             "match_welfare",
             "avg_worker_rank_diff",
             "avg_firm_rank_diff",
+            "avg_rank_diff_period0",
+            "avg_rank_diff_period1",
         ])
         
         # Write data rows
@@ -606,6 +651,8 @@ def save_experiment_2_csv(results: Dict[str, List], save_dir: str = "hh_simulati
                 results["match_welfare"][i],
                 results["avg_worker_rank_diff"][i],
                 results["avg_firm_rank_diff"][i],
+                results["avg_rank_diff_period0"][i],
+                results["avg_rank_diff_period1"][i],
             ])
     
     print(f"Saved CSV to {csv_path}")
@@ -631,6 +678,8 @@ def save_experiment_3_csv(results: Dict[str, List], save_dir: str = "hh_simulati
             "match_welfare",
             "avg_worker_rank_diff",
             "avg_firm_rank_diff",
+            "avg_rank_diff_period0",
+            "avg_rank_diff_period1",
         ])
         
         # Write data rows
@@ -646,6 +695,8 @@ def save_experiment_3_csv(results: Dict[str, List], save_dir: str = "hh_simulati
                 results["match_welfare"][i],
                 results["avg_worker_rank_diff"][i],
                 results["avg_firm_rank_diff"][i],
+                results["avg_rank_diff_period0"][i],
+                results["avg_rank_diff_period1"][i],
             ])
     
     print(f"Saved CSV to {csv_path}")
