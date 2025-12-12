@@ -24,7 +24,7 @@ Run a sample simulation:
 - `--matching-algorithm` `hungarian` (O(n^3), default) or `enumerative` (slow)
 - `--seed`
 
-## Where things live
+## Organization
 - `hh_simulation/agents.py`: worker/firm/headhunter objects and utility helpers
 - `hh_simulation/market.py`: two-period market loop and matching logic
 - `hh_simulation/__main__.py`: Typer CLI entrypoint
