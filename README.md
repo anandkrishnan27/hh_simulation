@@ -4,7 +4,6 @@ Two-period market simulation for exploring how headhunters/matching intermediari
 
 ## Quickstart
 ```bash
-cd "/Users/anandkrishnan/Desktop/Stanford/ECON 285/hh_simulation"
 python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/pip install -r requirements.txt
